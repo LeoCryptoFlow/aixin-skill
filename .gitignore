@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+~/.aixin/
+*.egg-info/
+dist/
+build/
