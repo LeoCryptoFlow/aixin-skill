@@ -65,6 +65,8 @@ class AIXinSkill:
             return "❌ 用法：/aixin 发送 [AX-ID] [消息内容]"
         elif text.startswith("/aixin 聊天"):
             return self.enter_chat(text.replace("/aixin 聊天", "").strip())
+        elif text.startswith("/aixin 消息"):
+            return self.check_messages()
         elif text == "/aixin 好友":
             return self.list_friends()
         elif text.startswith("/aixin 任务"):
@@ -194,7 +196,63 @@ class AIXinSkill:
         if not target_id:
             return "请输入对方 AX-ID"
         self.chat_target = target_id
-        return f"💬 进入与 {target_id} 的聊天，直接输入消息发送。/aixin 退出 结束。"
+
+        lines = [f"💬 已进入与 {target_id} 的聊天模式。"]
+        try:
+            resp = requests.get(
+                f"{API_BASE}/messages/{self.ax_id}/unread/details",
+                params={"limit": 50}, timeout=10
+            )
+            data = resp.json()
+            if data.get("ok") and data["data"]:
+                msgs = [m for m in data["data"] if m["from_id"] == target_id]
+                if msgs:
+                    lines.append(f"\n📨 {len(msgs)} 条未读消息：\n")
+                    for m in msgs:
+                        sender = m.get("sender_name", m["from_id"])
+                        lines.append(f"  [{m['created_at']}] {sender}：{m['content']}")
+                    requests.post(f"{API_BASE}/messages/read", json={
+                        "to": self.ax_id, "from": target_id
+                    }, timeout=5)
+                else:
+                    lines.append("\n暂无未读消息。")
+        except Exception as e:
+            lines.append(f"\n⚠️ 拉取消息失败：{e}")
+
+        lines.append("\n直接输入消息即可发送，/aixin 退出 结束聊天。")
+        return "\n".join(lines)
+
+    def check_messages(self):
+        """查看所有未读消息详情"""
+        if not self.ax_id:
+            return "请先注册：/aixin 注册"
+        try:
+            resp = requests.get(
+                f"{API_BASE}/messages/{self.ax_id}/unread/details",
+                params={"limit": 100}, timeout=10
+            )
+            data = resp.json()
+            if data.get("ok") and data["data"]:
+                msgs = data["data"]
+                grouped = {}
+                for m in msgs:
+                    fid = m["from_id"]
+                    if fid not in grouped:
+                        grouped[fid] = []
+                    grouped[fid].append(m)
+
+                lines = [f"📬 您有 {len(msgs)} 条未读消息，来自 {len(grouped)} 位好友：\n"]
+                for fid, fmsgs in grouped.items():
+                    sender = fmsgs[0].get("sender_name", fid)
+                    lines.append(f"👤 {sender}（{fid}）— {len(fmsgs)} 条：")
+                    for m in fmsgs:
+                        lines.append(f"  [{m['created_at']}] {m['content']}")
+                    lines.append("")
+                lines.append("输入 /aixin 聊天 [AX-ID] 回复对方")
+                return "\n".join(lines)
+            return "📭 暂无未读消息。"
+        except Exception as e:
+            return f"❌ 查看消息失败：{e}"
 
     def _send_message(self, target_id, content):
         if not self.ax_id:
@@ -287,7 +345,8 @@ class AIXinSkill:
 /aixin 添加 [ID]   添加好友
 /aixin 发送 [ID] [内容]  发消息
 /aixin 好友        好友列表
-/aixin 聊天 [ID]   进入聊天
+/aixin 聊天 [ID]   进入聊天（自动显示未读）
+/aixin 消息        查看未读消息详情
 /aixin 任务 [ID] [描述]  委派任务
 /aixin 市场 [词]   技能市场
 /aixin 退出        退出聊天
