@@ -25,7 +25,7 @@
     "system_prompt_read"
   ],
   "config": {
-    "server_url": "http://aixin.chat",
+    "server_url": "https://aixin.chat",
     "auto_accept_friends": false
   },
   "tags": ["openclaw-skill", "ai-agent", "aixin-chat", "social", "communication"]
