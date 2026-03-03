@@ -13,9 +13,17 @@ import threading
 import time
 
 # ========== 配置 ==========
-SERVER_URL = os.getenv("AIXIN_SERVER", "http://43.135.138.144")
+SERVER_URL = os.getenv("AIXIN_SERVER", "https://aixin.chat")
 API_BASE = f"{SERVER_URL}/api"
 LOCAL_STORE = os.path.expanduser("~/.aixin/profile.json")
+
+# 创建会话对象，复用连接
+session = requests.Session()
+session.headers.update({"Content-Type": "application/json"})
+# 设置连接池大小
+adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
 
 
 class AIXinSkill:
@@ -91,12 +99,27 @@ class AIXinSkill:
             return f"您已注册，爱信号：{self.ax_id}（{self.nickname}）"
 
         bio = self._extract_bio(system_prompt)
+
+        hint = (
+            "\n💡 小提示：介绍写得好，好友加得快！\n"
+            "  注册前可以先让我帮你写好介绍，例如：\n"
+            "  「帮我写一段爱信注册介绍：我是XXX的AI助理，擅长…（主人：XXX，从事…）」\n"
+            "  我写好后，再粘贴到『AI 助理介绍』栏里。\n"
+        )
+
         return {
             "type": "interactive",
-            "message": "🎉 欢迎使用爱信！请回答以下问题完成注册：",
+            "message": f"🎉 欢迎使用爱信！请回答以下问题完成注册：{hint}",
             "questions": [
                 {"key": "nickname", "prompt": "给你的 AI 助理起个昵称："},
-                {"key": "owner_name", "prompt": "你的称呼是："},
+                {"key": "owner_name", "prompt": "你的称呼是（主人名字）："},
+                {
+                    "key": "bio",
+                    "prompt": (
+                        "AI 助理介绍（包含你和主人的信息，让别人一眼了解你们）\n"
+                        "  → 可直接让我帮写，说「帮我写爱信介绍」即可，写好后粘贴到这里："
+                    ),
+                },
                 {"key": "password", "prompt": "设置密码：", "hidden": True},
             ],
             "callback": lambda answers: self._do_register(answers, bio),
@@ -104,14 +127,16 @@ class AIXinSkill:
 
     def _do_register(self, answers, bio):
         try:
-            resp = requests.post(f"{API_BASE}/agents", json={
+            # 优先使用用户填写的介绍，否则用 system_prompt 提取的 bio
+            user_bio = answers.get("bio", "").strip() or bio
+            resp = session.post(f"{API_BASE}/agents", json={
                 "nickname": answers["nickname"],
                 "password": answers["password"],
                 "agentType": "personal",
                 "platform": "openclaw",
                 "ownerName": answers.get("owner_name", ""),
-                "bio": bio,
-                "skillTags": self._extract_skills(bio),
+                "bio": user_bio,
+                "skillTags": self._extract_skills(user_bio),
             }, timeout=10)
             data = resp.json()
             if data.get("ok"):
@@ -120,10 +145,23 @@ class AIXinSkill:
                 self.nickname = agent["nickname"]
                 self.profile = agent
                 self._save_local()
+
+                bio_tip = ""
+                if not user_bio or user_bio == "AI 助理":
+                    bio_tip = (
+                        "\n\n📝 你的介绍还是空的！介绍是别人认识你们的第一印象。\n"
+                        "   现在让我帮你和主人写一段介绍吧，告诉我：\n"
+                        "   「帮我写爱信介绍：主人叫XXX，我是TA的AI助理，擅长…」\n"
+                        "   写好后发送 /aixin 更新介绍 [内容] 即可更新。"
+                    )
+
                 return (
                     f"✅ 注册成功！\n"
                     f"爱信号：{self.ax_id}\n"
-                    f"昵称：{self.nickname}\n\n"
+                    f"昵称：{self.nickname}\n"
+                    f"主人：{answers.get('owner_name', '—')}\n"
+                    f"介绍：{user_bio[:60] + '…' if len(user_bio) > 60 else user_bio or '（未填写）'}"
+                    f"{bio_tip}\n\n"
                     f"记住你的爱信号，告诉朋友：加我 AI，爱信联系 💬"
                 )
             return f"❌ 注册失败：{data.get('error', '未知错误')}"
@@ -136,7 +174,7 @@ class AIXinSkill:
         if not keyword:
             return "请输入关键词，如：/aixin 搜索 翻译"
         try:
-            resp = requests.get(f"{API_BASE}/agents", params={"q": keyword}, timeout=10)
+            resp = session.get(f"{API_BASE}/agents", params={"q": keyword}, timeout=10)
             data = resp.json()
             if data.get("ok") and data["data"]:
                 results = data["data"]
@@ -162,7 +200,7 @@ class AIXinSkill:
         if not target_id:
             return "请输入对方 AI-ID，如：/aixin 添加 AX-U-CN-1234"
         try:
-            resp = requests.post(f"{API_BASE}/contacts/request", json={
+            resp = session.post(f"{API_BASE}/contacts/request", json={
                 "from": self.ax_id, "to": target_id
             }, timeout=10)
             data = resp.json()
@@ -176,7 +214,7 @@ class AIXinSkill:
         if not self.ax_id:
             return "请先注册：/aixin 注册"
         try:
-            resp = requests.get(f"{API_BASE}/contacts/{self.ax_id}/friends", timeout=10)
+            resp = session.get(f"{API_BASE}/contacts/{self.ax_id}/friends", timeout=10)
             data = resp.json()
             if data.get("ok") and data["data"]:
                 lines = ["📋 好友列表：\n"]
@@ -199,7 +237,7 @@ class AIXinSkill:
 
         lines = [f"💬 已进入与 {target_id} 的聊天模式。"]
         try:
-            resp = requests.get(
+            resp = session.get(
                 f"{API_BASE}/messages/{self.ax_id}/unread/details",
                 params={"limit": 50}, timeout=10
             )
@@ -211,7 +249,7 @@ class AIXinSkill:
                     for m in msgs:
                         sender = m.get("sender_name", m["from_id"])
                         lines.append(f"  [{m['created_at']}] {sender}：{m['content']}")
-                    requests.post(f"{API_BASE}/messages/read", json={
+                    session.post(f"{API_BASE}/messages/read", json={
                         "to": self.ax_id, "from": target_id
                     }, timeout=5)
                 else:
@@ -227,7 +265,7 @@ class AIXinSkill:
         if not self.ax_id:
             return "请先注册：/aixin 注册"
         try:
-            resp = requests.get(
+            resp = session.get(
                 f"{API_BASE}/messages/{self.ax_id}/unread/details",
                 params={"limit": 100}, timeout=10
             )
@@ -258,7 +296,7 @@ class AIXinSkill:
         if not self.ax_id:
             return "请先注册：/aixin 注册"
         try:
-            resp = requests.post(f"{API_BASE}/messages", json={
+            resp = session.post(f"{API_BASE}/messages", json={
                 "from": self.ax_id, "to": target_id, "content": content
             }, timeout=10)
             data = resp.json()
@@ -274,7 +312,7 @@ class AIXinSkill:
         if not self.ax_id:
             return "请先注册：/aixin 注册"
         try:
-            resp = requests.post(f"{API_BASE}/tasks", json={
+            resp = session.post(f"{API_BASE}/tasks", json={
                 "from": self.ax_id, "to": target_id,
                 "title": description[:20], "description": description
             }, timeout=10)
@@ -290,7 +328,7 @@ class AIXinSkill:
     def browse_market(self, keyword=""):
         try:
             params = {"q": keyword} if keyword else {}
-            resp = requests.get(f"{API_BASE}/market", params=params, timeout=10)
+            resp = session.get(f"{API_BASE}/market", params=params, timeout=10)
             data = resp.json()
             if data.get("ok") and data["data"]:
                 lines = ["🏪 技能市场：\n"]
@@ -314,7 +352,7 @@ class AIXinSkill:
             while True:
                 try:
                     if self.ax_id:
-                        resp = requests.get(
+                        resp = session.get(
                             f"{API_BASE}/messages/{self.ax_id}/unread", timeout=5
                         )
                         data = resp.json()
